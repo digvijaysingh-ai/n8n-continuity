@@ -246,7 +246,7 @@ Pick ONE lever, in Spanish, from: "consulta preliminar de mercado (art. 115)", "
 "cláusula «o equivalente» en la próxima compra de equipo", "actuar en la renovación del acuerdo marco",
 "confirmar con el servicio si la necesidad sigue".
 
-Reply with ONLY one JSON object, no code fence, no text before or after:
+Reply with ONLY one JSON object, no code fence, no text before or after. Inside values use single quotes, never double quotes:
 {"bucket": "structural|earlier_decision|addressable|unclear", "signals": "the 1-3 facts that decided it",
  "lever": "one lever from the list", "headline": "max 15 words", "why": "two sentences from the facts above",
  "confidence": "high|medium|low"}"""
@@ -276,6 +276,12 @@ return $input.all().map((it, i) => {
     t = m ? JSON.parse(m[0]) : null;
     if (t && typeof t.output === 'object') t = t.output;
   } catch (e) { t = null; }
+  if (!t) {   // JSON broken by an unescaped quote inside a value: read the fields one by one
+    const keys = ['bucket', 'signals', 'lever', 'headline', 'why', 'confidence'];
+    const field = k => (raw.match(new RegExp(`"${k}"\\s*:\\s*"([\\s\\S]*?)"\\s*(?=,\\s*"(?:${keys.join('|')})"|\\s*\\})`)) ?? [])[1];
+    const f = Object.fromEntries(keys.map(k => [k, field(k)]));
+    if (f.bucket && f.headline) t = f;
+  }
   const ok = t && buckets.includes(t.bucket) && t.headline;
   if (!ok) t = { bucket: 'unclear', confidence: 'low', signals: 'reply not readable',
                  lever: 'confirmar con el servicio si la necesidad sigue',
