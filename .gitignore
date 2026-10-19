@@ -1,0 +1,5 @@
+node_modules/
+.n8n/
+.env
+*.log
+__pycache__/

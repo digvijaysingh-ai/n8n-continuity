@@ -1,0 +1,40 @@
+# Contract continuity on n8n
+
+Showcase for the n8n Deployment Strategist role: a hospital procurement team stops finding out about
+expiring contracts too late. Built on Licita's public procurement data (PLACSP); hospitals appear only
+as design partners of an independent research project.
+
+## Anonymity
+
+No buyer, region or tribunal is named in this repo (the same rule as Licita). The API serves keyed
+hospital codes (`H-xxxx`) and contract tokens (`C-xxxxxxxx`), scrubs titles with Licita's keyed
+denylist, and drops links, suppliers and tax ids. `scripts/anon_check.py` runs Licita's gate over
+every tracked file. Public dates and budgets could still be matched against PLACSP by someone
+determined; nothing here names anyone.
+
+## Architecture
+
+```
+Licita spine (DuckDB, system of record)
+   └─ api/server.py   read-only JSON: /health /radar /deserted   (never writes)
+        └─ n8n        schedule → fetch → Claude note → human approval → decision log
+```
+
+Business logic (successor matching, lead times, deserted-lot tracking) stays in Licita.
+n8n owns orchestration, approvals, routing and the audit trail.
+
+## Run locally
+
+```bash
+scripts/api.sh     # http://127.0.0.1:8787/health
+scripts/n8n.sh     # http://localhost:5678 (Node >= 24, state in ./.n8n)
+```
+
+`compose.yaml` sketches the customer deployment (private network, only the editor on localhost,
+encryption key from `.env`). Not yet tested: Docker is not installed on the build machine.
+
+## Layout
+
+- `api/` read-only Licita API
+- `workflows/` exported n8n workflows (JSON, no credentials)
+- `docs/` discovery, opportunity backlog, operating model

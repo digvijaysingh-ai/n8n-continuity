@@ -1,0 +1,507 @@
+{
+  "name": "Contract continuity – weekly expiry radar",
+  "nodes": [
+    {
+      "id": "3cfc7f41-a59c-5457-b547-297f5581e257",
+      "name": "Every Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "8766eac4-663f-53bb-abe7-4f3ba8bca2d2",
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "eb8f8fb7-03ca-573c-9fce-7e210244c1d2",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "radar_url",
+              "type": "string",
+              "value": "https://raw.githubusercontent.com/digvijaysingh-ai/n8n-continuity/main/snapshot/radar_H-f381.json"
+            },
+            {
+              "id": "c2",
+              "name": "approver_email",
+              "type": "string",
+              "value": "you@example.com"
+            },
+            {
+              "id": "c3",
+              "name": "max_decisions",
+              "type": "number",
+              "value": 5
+            },
+            {
+              "id": "c4",
+              "name": "language",
+              "type": "string",
+              "value": "English"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "89547e52-885d-5db7-b4b8-e26e25976d2a",
+      "name": "Fetch radar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "url": "={{ $json.radar_url }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "9ea94319-9923-5603-9160-9fb270cacb83",
+      "name": "One item per contract",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "fieldToSplitOut": "items",
+        "options": {}
+      }
+    },
+    {
+      "id": "37fdaae6-7e4a-5ef0-b3db-11259c595120",
+      "name": "Needs a decision",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "combinator": "or",
+          "conditions": [
+            {
+              "id": "f1",
+              "leftValue": "={{ $json.flag }}",
+              "rightValue": "start_now",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "f2",
+              "leftValue": "={{ $json.flag }}",
+              "rightValue": "verify",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "5de9f7ff-33b3-5de8-be15-0103eb2fe7a3",
+      "name": "Top contracts",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "maxItems": "={{ $('Config').first().json.max_decisions }}"
+      }
+    },
+    {
+      "id": "1c72f5fb-3494-5bb6-9712-fc28546de80c",
+      "name": "Claude brief",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        1440,
+        100
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=You help the procurement head of a Spanish public hospital avoid contracts lapsing without a successor.\nWrite in {{ $('Config').first().json.language }}. Use ONLY the facts below; if something is unknown, say so. No legal advice.\n\nContract: {{ $json.title }}\nContract ref: {{ $json.contract_ref }}\nEnds (initial term): {{ $json.end_initial ?? 'unknown' }} | Max with extensions: {{ $json.end_max ?? 'unknown' }}\nAnnual budget (EUR): {{ $json.annual_budget ?? 'unknown' }} | Bids last time: {{ $json.min_bids ?? '?' }}–{{ $json.max_bids ?? '?' }}\nRadar flag: {{ $json.flag }} (start_now = the start-by date has passed; verify = ended recently, successor uncertain)\nStart-by date: {{ $json.start_by ?? 'unknown' }} = end minus typical lead time for this CPV ({{ $json.lead_days }} days, p80 of past tenders) minus {{ $json.prep_days }} days internal preparation (an assumption)\nSuccessor match: {{ $json.successor_status }} (heuristic, confidence {{ $json.match_confidence }}){{ $json.successor_title ? ' – candidate: ' + $json.successor_title : '' }}\n\nPick one recommendation:\n- start_retender: no successor and the timeline is tight\n- confirm_extension: the max term is later than the initial end, so an extension may cover it\n- check_successor: a successor may exist but the match is uncertain, or the contract already ended\n- no_action: only if the facts clearly show it is covered\n\nReply with ONLY one JSON object, no code fence, no text before or after:\n{\"recommendation\": \"start_retender|confirm_extension|check_successor|no_action\",\n \"headline\": \"max 15 words\", \"why\": \"two sentences from the facts above\",\n \"next_step\": \"one concrete action with an owner\", \"confidence\": \"high|medium|low\"}",
+        "hasOutputParser": false
+      }
+    },
+    {
+      "id": "776d4ef2-a417-50f4-a61d-c84882269c63",
+      "name": "Claude",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        1400,
+        320
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-5-5"
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokensToSample": 1024
+        }
+      }
+    },
+    {
+      "id": "ea85b5d9-e5d9-55ec-8308-95d05b0c3351",
+      "name": "Parse brief",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Read Claude's reply tolerantly. A reply that can't be read becomes a visible low-confidence\n// \"check successor\" item on the form; it never silently drops a contract.\nconst allowed = { recommendation: ['start_retender', 'confirm_extension', 'check_successor', 'no_action'],\n                  confidence: ['high', 'medium', 'low'] };\nreturn $input.all().map((it, i) => {\n  const contract = $('Top contracts').all()[i].json;\n  const raw = String(it.json.text ?? it.json.output ?? '');\n  let brief = null;\n  try {\n    const m = raw.replace(/```(?:json)?/g, '').match(/\\{[\\s\\S]*\\}/);\n    brief = m ? JSON.parse(m[0]) : null;\n    if (brief && typeof brief.output === 'object') brief = brief.output;   // Claude sometimes wraps it\n  } catch (e) { brief = null; }\n  const ok = brief && allowed.recommendation.includes(brief.recommendation) && brief.headline;\n  if (!ok) brief = { recommendation: 'check_successor', confidence: 'low', headline: String(contract.title ?? '').slice(0, 90),\n                     why: 'Claude\\'s reply could not be read, so this needs a manual look.',\n                     next_step: 'Procurement: check this contract by hand.' };\n  if (!allowed.confidence.includes(brief.confidence)) brief.confidence = 'low';\n  return { json: { ...contract, brief, brief_parsed: !!ok } };\n});"
+      }
+    },
+    {
+      "id": "46b5fa30-fb8a-590d-9f4e-7375432409e3",
+      "name": "Build digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// One weekly digest: one form with Claude's brief + a decision dropdown per contract.\nconst cfg = $('Config').first().json;\nconst meta = $('Fetch radar').first().json;\nconst briefs = $input.all().map((it, i) => ({ n: i + 1, ...it.json }));\nconst esc = s => String(s ?? '').replace(/[&<>\"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' }[c]));\nconst label = { start_retender: 'Start re-tender', confirm_extension: 'Confirm extension',\n                check_successor: 'Check successor', no_action: 'No action' };\nconst options = ['Start re-tender', 'Confirm extension', 'Dismiss', 'Needs checking'];\n\nconst fields = [];\nfor (const b of briefs) {\n  fields.push({ fieldType: 'html', elementName: `brief_${b.n}`, html:\n    `<h3>${b.n}. ${esc(b.brief.headline)}</h3>` +\n    `<p><b>${esc(b.title)}</b><br>Ends ${esc(b.end_initial)} · start-by ${esc(b.start_by)} · ` +\n    `${esc(b.flag)} · Claude suggests: <b>${esc(label[b.brief.recommendation])}</b> (${esc(b.brief.confidence)})</p>` +\n    `<p>${esc(b.brief.why)}</p><p><i>Next step:</i> ${esc(b.brief.next_step)}</p>` +\n    (b.link ? `<p><a href=\"${esc(b.link)}\">Open on PLACSP</a></p>` : '') });\n  fields.push({ fieldLabel: `Decision ${b.n}`, fieldType: 'dropdown', requiredField: true,\n                fieldOptions: { values: options.map(option => ({ option })) } });\n}\nfields.push({ fieldLabel: 'Note for the team', fieldType: 'textarea', requiredField: false });\n\nconst lines = briefs.map(b => `${b.n}. ${b.brief.headline} (${b.flag}, start-by ${b.start_by ?? 'unknown'})`);\nconst message = [\n  `${briefs.length} contracts at ${meta.name} need a decision this week.`,\n  `Data: public PLACSP awards, radar as of ${meta.as_of}. Claude drafts, you decide; nothing is sent to suppliers.`,\n  '', ...lines, '', 'Open the form below to decide on each one.',\n].join('\\n');\n\nreturn [{ json: { subject: `Contract continuity: ${briefs.length} decisions (${meta.name})`, message,\n                  formJson: JSON.stringify(fields), briefs, as_of: meta.as_of, hospital: meta.hospital,\n                  approver: cfg.approver_email } }];"
+      }
+    },
+    {
+      "id": "ce64699c-f108-5b3f-ad6a-5c17b9907f91",
+      "name": "Ask procurement head",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2240,
+        100
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendAndWait",
+        "sendTo": "={{ $json.approver }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.message }}",
+        "responseType": "customForm",
+        "defineForm": "json",
+        "jsonOutput": "={{ $json.formJson }}",
+        "options": {
+          "messageButtonLabel": "Open decision form",
+          "responseFormTitle": "Contract continuity – this week's decisions",
+          "responseFormButtonLabel": "Submit decisions",
+          "appendAttribution": false,
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 3,
+              "resumeUnit": "days"
+            }
+          }
+        }
+      },
+      "webhookId": "8e422c37-2c2e-46c3-bb66-f43da283c528"
+    },
+    {
+      "id": "fa185952-0433-5c44-b935-fbe81fc75dc6",
+      "name": "Decision rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2480,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Turn the form answers into one decision row per contract (the audit trail).\nconst d = $('Build digest').first().json;\nconst answers = $input.first().json.data ?? {};\nconst decidedAt = $now.toISO();\nreturn d.briefs.map(b => ({ json: {\n  decided_at: decidedAt, hospital: d.hospital, radar_as_of: d.as_of,\n  folder_id: b.contract_ref, title: b.title, flag: b.flag, start_by: b.start_by ?? '',\n  claude_recommendation: b.brief.recommendation, claude_confidence: b.brief.confidence,\n  decision: answers[`Decision ${b.n}`] ?? 'no answer', note: answers['Note for the team'] ?? '',\n  decided_by: d.approver, execution_id: $execution.id, link: b.link ?? '',\n} }));"
+      }
+    },
+    {
+      "id": "f344fa09-89ad-5740-986a-ac9bc264a19b",
+      "name": "Log decisions",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        2720,
+        100
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "continuity_decisions"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3e3da450-61a4-5eee-b1e5-c67af54ad16e",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -380
+      ],
+      "parameters": {
+        "content": "## Contract continuity: weekly expiry radar\nFinds contracts that will lapse without a successor and asks the procurement head to decide.\n\n**Data:** public PLACSP awards via Licita (read-only). Swap `radar_url` in Config for the live Licita API (`http://127.0.0.1:8787/radar?hospital=H-f381`) when self-hosted.\n\n**Guardrails:** Claude only drafts; a human decides every item; nothing goes to suppliers; every decision is logged with who, when and what Claude suggested.",
+        "width": 640,
+        "height": 330,
+        "color": "5"
+      }
+    },
+    {
+      "id": "afb9149c-c09a-5813-a250-9656e0faa6fe",
+      "name": "Human in the loop",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2180,
+        -280
+      ],
+      "parameters": {
+        "content": "### One email, one form\nThe head gets one weekly digest, not five emails. Each contract shows Claude's brief and a required decision. If nobody answers in 3 days the run resumes and logs `no answer`, so silence is visible, not lost.",
+        "width": 520,
+        "height": 250,
+        "color": "4"
+      }
+    },
+    {
+      "id": "b216687f-2029-578d-bed4-e0ebfef177a2",
+      "name": "Audit trail",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2420,
+        320
+      ],
+      "parameters": {
+        "content": "### Decision log\nData table `continuity_decisions`. One row per contract per week: decision, Claude's suggestion and confidence, who decided, execution id. That gives you the adoption metric and lets you check how often Claude's suggestion is overridden.",
+        "width": 520,
+        "height": 220,
+        "color": "6"
+      }
+    }
+  ],
+  "connections": {
+    "Every Monday 08:00": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch radar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch radar": {
+      "main": [
+        [
+          {
+            "node": "One item per contract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per contract": {
+      "main": [
+        [
+          {
+            "node": "Needs a decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs a decision": {
+      "main": [
+        [
+          {
+            "node": "Top contracts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Top contracts": {
+      "main": [
+        [
+          {
+            "node": "Claude brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude brief": {
+      "main": [
+        [
+          {
+            "node": "Parse brief",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse brief": {
+      "main": [
+        [
+          {
+            "node": "Build digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build digest": {
+      "main": [
+        [
+          {
+            "node": "Ask procurement head",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask procurement head": {
+      "main": [
+        [
+          {
+            "node": "Decision rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision rows": {
+      "main": [
+        [
+          {
+            "node": "Log decisions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Claude brief",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": []
+}

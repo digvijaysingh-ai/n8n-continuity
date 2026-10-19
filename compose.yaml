@@ -1,0 +1,24 @@
+# How this would run at a customer: n8n + the read-only Licita API on one private network.
+# Only n8n's editor is published, on localhost. Secrets come from .env (never committed).
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:stable
+    ports: ["127.0.0.1:5678:5678"]
+    environment:
+      GENERIC_TIMEZONE: Europe/Madrid
+      TZ: Europe/Madrid
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set in .env}
+      LICITA_API: http://licita-api:8787
+    volumes: [n8n_data:/home/node/.n8n]
+    depends_on: [licita-api]
+  licita-api:
+    build: { context: ../licita }
+    command: ["python", "/app/api/server.py"]
+    environment: { HOST: 0.0.0.0, LICITA_HOME: /licita }
+    volumes:
+      - ./api:/app/api:ro
+      - ../licita/spines:/licita/spines:ro
+      - ../licita/profiles:/licita/profiles:ro
+volumes:
+  n8n_data:
