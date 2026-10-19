@@ -41,6 +41,7 @@ def main_link(*pairs):
 
 BRIEF_PROMPT = """=You help the procurement head of a Spanish public hospital avoid contracts lapsing without a successor.
 Write in {{ $('Config').first().json.language }}. Use ONLY the facts below; if something is unknown, say so. No legal advice.
+Name the contract by what it buys (e.g. 'Da Vinci maintenance'), never by its ref code. Write 're-tender' with a hyphen.
 
 Contract: {{ $json.title }}
 Contract ref: {{ $json.contract_ref }}
