@@ -29,5 +29,5 @@ form → 5 rows in `continuity_decisions`. Data is anonymised: hospital code H-f
 2. **Import from URL**: `…/main/workflows/deserted_triage.json`.
 3. **Claude** node: Gateway credits. **Email owner**: your Gmail credential.
 4. **Config**: set `procurement_email` and `units_email` (both can be your address for a demo).
-5. **Run now.** Up to 6 new deserted lots are classified, routed by reason, emailed (one email per owner)
+5. **Run now.** Deserted lots are grouped by tender; up to 6 new tenders are classified, routed by reason, emailed (one email per owner)
    and logged. Run it again: nothing is emailed twice, because `Not triaged yet` skips logged lots.

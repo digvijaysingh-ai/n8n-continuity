@@ -225,8 +225,9 @@ TRIAGE_PROMPT = """=You help the procurement team of a Spanish public hospital u
 Use ONLY the facts below. If the facts don't support a reason, say "unclear". No legal advice.
 Name the lot by what it buys, never by its ref code.
 
-Lot: {{ $json.title }}
-CPV (4 digits): {{ $json.cpv4 }} | Procedure code: {{ $json.procedure }} | Budget (EUR, rounded): {{ $json.budget ?? 'unknown' }}
+Tender: {{ $json.title }}
+Lots declared deserted in this tender: {{ $json.lots }} (total budget EUR, rounded: {{ $json.budget || 'unknown' }})
+CPV (4 digits): {{ $json.cpv4 }} | Procedure code: {{ $json.procedure }}
 Declared deserted: {{ $json.deserted_date }} | What happened next: {{ $json.outcome }}{{ $json.republished_title ? ' – republished as: ' + $json.republished_title : '' }}
 Market for this CPV at other Spanish health buyers: {{ $json.market_n ?? '?' }} open lots, median {{ $json.market_median_bids ?? '?' }} bids, {{ $json.market_single_bid_rate != null ? Math.round($json.market_single_bid_rate * 100) + ' %' : '?' }} single-bid
 
@@ -250,11 +251,24 @@ Reply with ONLY one JSON object, no code fence, no text before or after:
  "lever": "one lever from the list", "headline": "max 15 words", "why": "two sentences from the facts above",
  "confidence": "high|medium|low"}"""
 
+GROUP_JS = r"""
+// Lots of one tender share a cause: triage the tender once, not each lot.
+const groups = new Map();
+for (const it of $input.all()) {
+  const l = it.json;
+  if (!groups.has(l.contract_ref)) groups.set(l.contract_ref, { ...l, lot_key: l.contract_ref, lots: 0, budget: 0 });
+  const g = groups.get(l.contract_ref);
+  g.lots += 1;
+  g.budget += l.budget ?? 0;
+}
+return [...groups.values()].map(json => ({ json }));
+"""
+
 TRIAGE_PARSE_JS = r"""
 // Read Claude's reply tolerantly. Unreadable replies become 'unclear' and go to a human; nothing is dropped.
 const buckets = ['structural', 'earlier_decision', 'addressable', 'unclear'];
 return $input.all().map((it, i) => {
-  const lot = $('Top lots').all()[i].json;
+  const lot = $('Top lots').all()[i].json;   // one tender, possibly several lots
   const raw = String(it.json.text ?? it.json.output ?? '');
   let t = null;
   try {
@@ -283,17 +297,17 @@ const label = { structural: 'Structural', earlier_decision: 'Earlier decision', 
 return Object.entries(byOwner).map(([email, lots]) => {
   const lines = lots.map((l, i) => [
     `${i + 1}. ${l.triage.headline}`,
-    `   ${label[l.triage.bucket]} (${l.triage.confidence}) → ${l.owner_role} · deserted ${l.deserted_date} · since then: ${l.outcome.replace('_', ' ')}`,
+    `   ${label[l.triage.bucket]} (${l.triage.confidence}) → ${l.owner_role} · ${l.lots} lot(s) · deserted ${l.deserted_date} · since then: ${l.outcome.replace('_', ' ')}`,
     `   Why: ${l.triage.why}`,
     `   Suggested lever: ${l.triage.lever}`,
   ].join('\n'));
   const message = [
-    `${lots.length} deserted lot(s) at ${meta.name} routed to you.`,
+    `${lots.length} tender(s) with deserted lots at ${meta.name} routed to you.`,
     'Public PLACSP data. Claude classified the likely reason with the hospital\'s rules; you decide what to do.',
     'If the reason looks wrong, reply to this email: the correction becomes ground truth.',
     '', ...lines,
   ].join('\n');
-  return { json: { to: email, subject: `Deserted lots: ${lots.length} routed to you (${meta.name})`, message } };
+  return { json: { to: email, subject: `Deserted lots: ${lots.length} tender(s) routed to you (${meta.name})`, message } };
 });
 """
 
@@ -339,7 +353,7 @@ def deserted_triage() -> dict:
              "value": "https://raw.githubusercontent.com/digvijaysingh-ai/n8n-continuity/main/snapshot/deserted_H-f381.json"},
             {"id": "c2", "name": "procurement_email", "type": "string", "value": "you@example.com"},
             {"id": "c3", "name": "units_email", "type": "string", "value": "you@example.com"},
-            {"id": "c4", "name": "max_lots", "type": "number", "value": 6},
+            {"id": "c4", "name": "max_tenders", "type": "number", "value": 6},
             {"id": "c5", "name": "language", "type": "string", "value": "English"},
         ]}, "options": {}}),
         node("Fetch deserted lots", "n8n-nodes-base.httpRequest", 4.2, (480, 100),
@@ -347,15 +361,13 @@ def deserted_triage() -> dict:
               "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}}},
              retryOnFail=True, maxTries=3, waitBetweenTries=5000),
         node("One item per lot", "n8n-nodes-base.splitOut", 1, (720, 100), {"fieldToSplitOut": "items", "options": {}}),
-        node("Lot key", "n8n-nodes-base.set", 3.4, (960, 100), {"assignments": {"assignments": [
-            {"id": "k1", "name": "lot_key", "type": "string", "value": "={{ $json.contract_ref }}/{{ $json.lot_id ?? '1' }}"}]},
-            "includeOtherFields": True, "options": {}}),
+        node("Group by tender", "n8n-nodes-base.code", 2, (960, 100), {"jsCode": GROUP_JS.strip()}),
         node("Not triaged yet", "n8n-nodes-base.dataTable", 1, (1200, 100), {
             "resource": "row", "operation": "rowNotExists",
             "dataTableId": {"__rl": True, "mode": "name", "value": "deserted_triage"},
             "filters": {"conditions": [{"keyName": "lot_key", "keyValue": "={{ $json.lot_key }}"}]}}),
         node("Top lots", "n8n-nodes-base.limit", 1, (1440, 100),
-             {"maxItems": "={{ $('Config').first().json.max_lots }}"}),
+             {"maxItems": "={{ $('Config').first().json.max_tenders }}"}),
         node("Claude triage", "@n8n/n8n-nodes-langchain.chainLlm", 1.7, (1680, 100),
              {"promptType": "define", "text": TRIAGE_PROMPT, "hasOutputParser": False}),
         node("Claude", "@n8n/n8n-nodes-langchain.lmChatAnthropic", 1.6, (1660, 320),
@@ -394,7 +406,7 @@ def deserted_triage() -> dict:
     ]
     connections = main_link(
         ("Every Monday 08:30", "Config"), ("Run now", "Config"), ("Config", "Fetch deserted lots"),
-        ("Fetch deserted lots", "One item per lot"), ("One item per lot", "Lot key"), ("Lot key", "Not triaged yet"),
+        ("Fetch deserted lots", "One item per lot"), ("One item per lot", "Group by tender"), ("Group by tender", "Not triaged yet"),
         ("Not triaged yet", "Top lots"), ("Top lots", "Claude triage"), ("Claude triage", "Parse triage"),
         ("Parse triage", "Route by reason"),
         ("Route by reason", "To Procurement", 0), ("Route by reason", "To Procurement + equipment owner", 1),
