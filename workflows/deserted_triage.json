@@ -1,0 +1,828 @@
+{
+  "name": "Contract continuity – deserted-lot triage",
+  "nodes": [
+    {
+      "id": "7651a33b-cbf8-53c2-a42a-e84df9201f50",
+      "name": "Every Monday 08:30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "744e0f4c-6383-5b1e-8dea-e295cd6f853b",
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "2c08575a-53be-5bb5-bd52-3c362b335d17",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "deserted_url",
+              "type": "string",
+              "value": "https://raw.githubusercontent.com/digvijaysingh-ai/n8n-continuity/main/snapshot/deserted_H-f381.json"
+            },
+            {
+              "id": "c2",
+              "name": "procurement_email",
+              "type": "string",
+              "value": "you@example.com"
+            },
+            {
+              "id": "c3",
+              "name": "units_email",
+              "type": "string",
+              "value": "you@example.com"
+            },
+            {
+              "id": "c4",
+              "name": "max_lots",
+              "type": "number",
+              "value": 6
+            },
+            {
+              "id": "c5",
+              "name": "language",
+              "type": "string",
+              "value": "English"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "4559a812-9965-5dde-8a58-8184629148aa",
+      "name": "Fetch deserted lots",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "url": "={{ $json.deserted_url }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "13e4b9e8-951e-52a6-9ab8-0b558ecfa2d7",
+      "name": "One item per lot",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "fieldToSplitOut": "items",
+        "options": {}
+      }
+    },
+    {
+      "id": "b755b193-58ff-5621-a99f-c04b1d8019d1",
+      "name": "Lot key",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "k1",
+              "name": "lot_key",
+              "type": "string",
+              "value": "={{ $json.contract_ref }}/{{ $json.lot_id ?? '1' }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "fb35cfb4-4145-5138-8100-88c365123ccf",
+      "name": "Not triaged yet",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "deserted_triage"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lot_key",
+              "keyValue": "={{ $json.lot_key }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "baaa559f-c694-56fd-8d3a-4922e934112e",
+      "name": "Top lots",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        100
+      ],
+      "parameters": {
+        "maxItems": "={{ $('Config').first().json.max_lots }}"
+      }
+    },
+    {
+      "id": "dcbcc8dd-8be0-527c-b794-bbdea68ab9c3",
+      "name": "Claude triage",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.7,
+      "position": [
+        1680,
+        100
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "=You help the procurement team of a Spanish public hospital understand why a tender lot received no bids\n(it was declared deserted) and who should act. Write in {{ $('Config').first().json.language }}.\nUse ONLY the facts below. If the facts don't support a reason, say \"unclear\". No legal advice.\nName the lot by what it buys, never by its ref code.\n\nLot: {{ $json.title }}\nCPV (4 digits): {{ $json.cpv4 }} | Procedure code: {{ $json.procedure }} | Budget (EUR, rounded): {{ $json.budget ?? 'unknown' }}\nDeclared deserted: {{ $json.deserted_date }} | What happened next: {{ $json.outcome }}{{ $json.republished_title ? ' – republished as: ' + $json.republished_title : '' }}\nMarket for this CPV at other Spanish health buyers: {{ $json.market_n ?? '?' }} open lots, median {{ $json.market_median_bids ?? '?' }} bids, {{ $json.market_single_bid_rate != null ? Math.round($json.market_single_bid_rate * 100) + ' %' : '?' }} single-bid\n\nClassify with these rules (from the hospital's own competition analysis):\n- structural: no clause would change it. Signals: the market is one supplier everywhere (single-bid share >= 80 %),\n  the manufacturer services its own machine, a patented medicine named by active principle, stated exclusivity.\n- earlier_decision: competition was decided before this tender. Signals: consumables or maintenance tied to\n  installed equipment (\"instalado en\", \"compatible con\", \"del equipo\", a brand name), a framework call-off, an extension.\n- addressable: nothing structural; a lever is worth trying. Signals: other buyers get several bids for the same\n  CPV (single-bid share < 50 %), a thin market (50-80 %), a very large lot (> EUR 500,000), a service contract.\n- unclear: the facts above don't support any of these.\n\nPick ONE lever, in Spanish, from: \"consulta preliminar de mercado (art. 115)\", \"dividir en lotes\",\n\"ampliar el plazo de presentación de ofertas\", \"revisar el presupuesto con el servicio promotor\",\n\"verificar la exclusividad técnica (art. 168) y valorar procedimiento negociado\",\n\"cláusula «o equivalente» en la próxima compra de equipo\", \"actuar en la renovación del acuerdo marco\",\n\"confirmar con el servicio si la necesidad sigue\".\n\nReply with ONLY one JSON object, no code fence, no text before or after:\n{\"bucket\": \"structural|earlier_decision|addressable|unclear\", \"signals\": \"the 1-3 facts that decided it\",\n \"lever\": \"one lever from the list\", \"headline\": \"max 15 words\", \"why\": \"two sentences from the facts above\",\n \"confidence\": \"high|medium|low\"}",
+        "hasOutputParser": false
+      }
+    },
+    {
+      "id": "62e509a2-f222-5a2a-a06d-4a73d82bf68a",
+      "name": "Claude",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.6,
+      "position": [
+        1660,
+        320
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "id",
+          "value": "claude-sonnet-5-5"
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokensToSample": 1024
+        }
+      }
+    },
+    {
+      "id": "773413bd-2a14-541a-900d-68d2e948ab29",
+      "name": "Parse triage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1900,
+        100
+      ],
+      "parameters": {
+        "jsCode": "// Read Claude's reply tolerantly. Unreadable replies become 'unclear' and go to a human; nothing is dropped.\nconst buckets = ['structural', 'earlier_decision', 'addressable', 'unclear'];\nreturn $input.all().map((it, i) => {\n  const lot = $('Top lots').all()[i].json;\n  const raw = String(it.json.text ?? it.json.output ?? '');\n  let t = null;\n  try {\n    const m = raw.replace(/```(?:json)?/g, '').match(/\\{[\\s\\S]*\\}/);\n    t = m ? JSON.parse(m[0]) : null;\n    if (t && typeof t.output === 'object') t = t.output;\n  } catch (e) { t = null; }\n  const ok = t && buckets.includes(t.bucket) && t.headline;\n  if (!ok) t = { bucket: 'unclear', confidence: 'low', signals: 'reply not readable',\n                 lever: 'confirmar con el servicio si la necesidad sigue',\n                 headline: String(lot.title ?? '').slice(0, 90),\n                 why: \"Claude's reply could not be read, so this lot needs a manual look.\" };\n  if (!['high', 'medium', 'low'].includes(t.confidence)) t.confidence = 'low';\n  return { json: { ...lot, triage: t, triage_parsed: !!ok } };\n});"
+      }
+    },
+    {
+      "id": "87661b54-5a99-57e6-aee5-ac229df8d0a2",
+      "name": "Route by reason",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2080,
+        100
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "r0",
+                    "leftValue": "={{ $json.triage.bucket }}",
+                    "rightValue": "structural",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "Structural"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "r1",
+                    "leftValue": "={{ $json.triage.bucket }}",
+                    "rightValue": "earlier_decision",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "Earlier decision"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "r2",
+                    "leftValue": "={{ $json.triage.bucket }}",
+                    "rightValue": "addressable",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "Addressable"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Unclear"
+        }
+      }
+    },
+    {
+      "id": "c9a334af-1e24-568c-91c5-1ffd67b1b44a",
+      "name": "To Procurement",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        -200
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "owner_role",
+              "type": "string",
+              "value": "Procurement"
+            },
+            {
+              "id": "o2",
+              "name": "owner_email",
+              "type": "string",
+              "value": "={{ $('Config').first().json.procurement_email }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "c91b510a-6373-5f8d-9610-a7bb6bb8883e",
+      "name": "To Procurement + equipment owner",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        -40
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "owner_role",
+              "type": "string",
+              "value": "Procurement + equipment owner"
+            },
+            {
+              "id": "o2",
+              "name": "owner_email",
+              "type": "string",
+              "value": "={{ $('Config').first().json.procurement_email }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "b8e6558a-3a8c-5e62-b1b4-ad56d11723d4",
+      "name": "To Requesting unit",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        120
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "owner_role",
+              "type": "string",
+              "value": "Requesting unit"
+            },
+            {
+              "id": "o2",
+              "name": "owner_email",
+              "type": "string",
+              "value": "={{ $('Config').first().json.units_email }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "df5e6aea-1632-5d99-a8cf-874ea27c66e7",
+      "name": "To Procurement (check)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2240,
+        280
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "o1",
+              "name": "owner_role",
+              "type": "string",
+              "value": "Procurement (check)"
+            },
+            {
+              "id": "o2",
+              "name": "owner_email",
+              "type": "string",
+              "value": "={{ $('Config').first().json.procurement_email }}"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "26d5d896-4f68-518d-b49d-6a321676b63e",
+      "name": "All routed lots",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        2480,
+        100
+      ],
+      "parameters": {
+        "numberInputs": 4
+      }
+    },
+    {
+      "id": "77a0a4ca-02db-5822-814b-67f9eb0149ce",
+      "name": "Digest per owner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// One email per owner with the lots routed to them. Routing informs; it does not decide.\nconst cfg = $('Config').first().json;\nconst meta = $('Fetch deserted lots').first().json;\nconst byOwner = {};\nfor (const it of $input.all()) (byOwner[it.json.owner_email] ??= []).push(it.json);\nconst label = { structural: 'Structural', earlier_decision: 'Earlier decision', addressable: 'Addressable',\n                unclear: 'Unclear' };\nreturn Object.entries(byOwner).map(([email, lots]) => {\n  const lines = lots.map((l, i) => [\n    `${i + 1}. ${l.triage.headline}`,\n    `   ${label[l.triage.bucket]} (${l.triage.confidence}) → ${l.owner_role} · deserted ${l.deserted_date} · since then: ${l.outcome.replace('_', ' ')}`,\n    `   Why: ${l.triage.why}`,\n    `   Suggested lever: ${l.triage.lever}`,\n  ].join('\\n'));\n  const message = [\n    `${lots.length} deserted lot(s) at ${meta.name} routed to you.`,\n    'Public PLACSP data. Claude classified the likely reason with the hospital\\'s rules; you decide what to do.',\n    'If the reason looks wrong, reply to this email: the correction becomes ground truth.',\n    '', ...lines,\n  ].join('\\n');\n  return { json: { to: email, subject: `Deserted lots: ${lots.length} routed to you (${meta.name})`, message } };\n});"
+      }
+    },
+    {
+      "id": "bdb28e19-fdc1-5e77-8f6e-8262e7858463",
+      "name": "Email owner",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2960,
+        0
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.message }}",
+        "options": {
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "17f5c61c-bb8b-52d6-b1b9-1beaf694c028",
+      "name": "Triage rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        220
+      ],
+      "parameters": {
+        "jsCode": "// The triage log: one row per lot, so the same lot is never triaged twice.\nconst at = $now.toISO();\nreturn $input.all().map(it => ({ json: {\n  triaged_at: at, hospital: it.json.hospital, lot_key: it.json.lot_key, title: it.json.title,\n  outcome: it.json.outcome, bucket: it.json.triage.bucket, lever: it.json.triage.lever,\n  owner_role: it.json.owner_role, confidence: it.json.triage.confidence, why: it.json.triage.why,\n} }));"
+      }
+    },
+    {
+      "id": "18e9942d-cb76-5904-829f-77bb290584ee",
+      "name": "Log triage",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        2960,
+        220
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "deserted_triage"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "712971fc-0664-5b46-b38c-4b1b29c8ed0d",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -420
+      ],
+      "parameters": {
+        "content": "## Deserted-lot triage\nA lot nobody bid for forces a negotiated procedure and the need is still there. Each week this finds new deserted lots, has Claude classify the likely reason with the hospital's own rules (structural / earlier decision / addressable) and routes each to the owner who can act.\n\n**Data:** public PLACSP results via Licita, anonymised. **Guardrails:** routing informs, it doesn't decide; unreadable or unsupported cases go to Procurement as `unclear`; every lot is logged once.",
+        "width": 700,
+        "height": 360,
+        "color": "5"
+      }
+    },
+    {
+      "id": "f1809e22-df60-5dc5-88ea-9fc7e2164efa",
+      "name": "Idempotent",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        -260
+      ],
+      "parameters": {
+        "content": "### Never twice\n`Not triaged yet` checks the `deserted_triage` table, so a lot is classified and emailed once, however often the workflow runs.",
+        "width": 420,
+        "height": 220,
+        "color": "4"
+      }
+    },
+    {
+      "id": "f2e0e5b1-21ce-510d-8930-d73a08f58c20",
+      "name": "Routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        -440
+      ],
+      "parameters": {
+        "content": "### Who acts\nStructural → Procurement (check exclusivity, negotiated procedure). Earlier decision → Procurement with the equipment owner. Addressable → the requesting unit (market consultation, budget, lots). Unclear → Procurement for a manual look.",
+        "width": 520,
+        "height": 200,
+        "color": "6"
+      }
+    }
+  ],
+  "connections": {
+    "Every Monday 08:30": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch deserted lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch deserted lots": {
+      "main": [
+        [
+          {
+            "node": "One item per lot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "One item per lot": {
+      "main": [
+        [
+          {
+            "node": "Lot key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lot key": {
+      "main": [
+        [
+          {
+            "node": "Not triaged yet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not triaged yet": {
+      "main": [
+        [
+          {
+            "node": "Top lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Top lots": {
+      "main": [
+        [
+          {
+            "node": "Claude triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude triage": {
+      "main": [
+        [
+          {
+            "node": "Parse triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse triage": {
+      "main": [
+        [
+          {
+            "node": "Route by reason",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by reason": {
+      "main": [
+        [
+          {
+            "node": "To Procurement",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To Procurement + equipment owner",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To Requesting unit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To Procurement (check)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All routed lots": {
+      "main": [
+        [
+          {
+            "node": "Digest per owner",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Triage rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Digest per owner": {
+      "main": [
+        [
+          {
+            "node": "Email owner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage rows": {
+      "main": [
+        [
+          {
+            "node": "Log triage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To Procurement": {
+      "main": [
+        [
+          {
+            "node": "All routed lots",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To Procurement + equipment owner": {
+      "main": [
+        [
+          {
+            "node": "All routed lots",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "To Requesting unit": {
+      "main": [
+        [
+          {
+            "node": "All routed lots",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "To Procurement (check)": {
+      "main": [
+        [
+          {
+            "node": "All routed lots",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Claude": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Claude triage",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": []
+}

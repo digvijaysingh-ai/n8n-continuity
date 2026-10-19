@@ -13,8 +13,12 @@ OUT = Path(__file__).parent
 MODEL = "claude-sonnet-5-5"
 
 
+WF = ["radar"]   # current workflow, so node ids stay unique per workflow
+
+
 def node(name, type_, version, pos, params, **extra):
-    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"n8n-continuity/{name}")), "name": name, "type": type_,
+    seed = f"n8n-continuity/{name}" if WF[0] == "radar" else f"n8n-continuity/{WF[0]}/{name}"
+    return {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, seed)), "name": name, "type": type_,
             "typeVersion": version, "position": list(pos), "parameters": params, **extra}
 
 
@@ -214,7 +218,200 @@ def expiry_radar() -> dict:
             "pinData": {}, "tags": []}
 
 
+# ---------------------------------------------------------------- deserted-lot triage
+
+TRIAGE_PROMPT = """=You help the procurement team of a Spanish public hospital understand why a tender lot received no bids
+(it was declared deserted) and who should act. Write in {{ $('Config').first().json.language }}.
+Use ONLY the facts below. If the facts don't support a reason, say "unclear". No legal advice.
+Name the lot by what it buys, never by its ref code.
+
+Lot: {{ $json.title }}
+CPV (4 digits): {{ $json.cpv4 }} | Procedure code: {{ $json.procedure }} | Budget (EUR, rounded): {{ $json.budget ?? 'unknown' }}
+Declared deserted: {{ $json.deserted_date }} | What happened next: {{ $json.outcome }}{{ $json.republished_title ? ' – republished as: ' + $json.republished_title : '' }}
+Market for this CPV at other Spanish health buyers: {{ $json.market_n ?? '?' }} open lots, median {{ $json.market_median_bids ?? '?' }} bids, {{ $json.market_single_bid_rate != null ? Math.round($json.market_single_bid_rate * 100) + ' %' : '?' }} single-bid
+
+Classify with these rules (from the hospital's own competition analysis):
+- structural: no clause would change it. Signals: the market is one supplier everywhere (single-bid share >= 80 %),
+  the manufacturer services its own machine, a patented medicine named by active principle, stated exclusivity.
+- earlier_decision: competition was decided before this tender. Signals: consumables or maintenance tied to
+  installed equipment ("instalado en", "compatible con", "del equipo", a brand name), a framework call-off, an extension.
+- addressable: nothing structural; a lever is worth trying. Signals: other buyers get several bids for the same
+  CPV (single-bid share < 50 %), a thin market (50-80 %), a very large lot (> EUR 500,000), a service contract.
+- unclear: the facts above don't support any of these.
+
+Pick ONE lever, in Spanish, from: "consulta preliminar de mercado (art. 115)", "dividir en lotes",
+"ampliar el plazo de presentación de ofertas", "revisar el presupuesto con el servicio promotor",
+"verificar la exclusividad técnica (art. 168) y valorar procedimiento negociado",
+"cláusula «o equivalente» en la próxima compra de equipo", "actuar en la renovación del acuerdo marco",
+"confirmar con el servicio si la necesidad sigue".
+
+Reply with ONLY one JSON object, no code fence, no text before or after:
+{"bucket": "structural|earlier_decision|addressable|unclear", "signals": "the 1-3 facts that decided it",
+ "lever": "one lever from the list", "headline": "max 15 words", "why": "two sentences from the facts above",
+ "confidence": "high|medium|low"}"""
+
+TRIAGE_PARSE_JS = r"""
+// Read Claude's reply tolerantly. Unreadable replies become 'unclear' and go to a human; nothing is dropped.
+const buckets = ['structural', 'earlier_decision', 'addressable', 'unclear'];
+return $input.all().map((it, i) => {
+  const lot = $('Top lots').all()[i].json;
+  const raw = String(it.json.text ?? it.json.output ?? '');
+  let t = null;
+  try {
+    const m = raw.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
+    t = m ? JSON.parse(m[0]) : null;
+    if (t && typeof t.output === 'object') t = t.output;
+  } catch (e) { t = null; }
+  const ok = t && buckets.includes(t.bucket) && t.headline;
+  if (!ok) t = { bucket: 'unclear', confidence: 'low', signals: 'reply not readable',
+                 lever: 'confirmar con el servicio si la necesidad sigue',
+                 headline: String(lot.title ?? '').slice(0, 90),
+                 why: "Claude's reply could not be read, so this lot needs a manual look." };
+  if (!['high', 'medium', 'low'].includes(t.confidence)) t.confidence = 'low';
+  return { json: { ...lot, triage: t, triage_parsed: !!ok } };
+});
+"""
+
+ROUTE_DIGEST_JS = r"""
+// One email per owner with the lots routed to them. Routing informs; it does not decide.
+const cfg = $('Config').first().json;
+const meta = $('Fetch deserted lots').first().json;
+const byOwner = {};
+for (const it of $input.all()) (byOwner[it.json.owner_email] ??= []).push(it.json);
+const label = { structural: 'Structural', earlier_decision: 'Earlier decision', addressable: 'Addressable',
+                unclear: 'Unclear' };
+return Object.entries(byOwner).map(([email, lots]) => {
+  const lines = lots.map((l, i) => [
+    `${i + 1}. ${l.triage.headline}`,
+    `   ${label[l.triage.bucket]} (${l.triage.confidence}) → ${l.owner_role} · deserted ${l.deserted_date} · since then: ${l.outcome.replace('_', ' ')}`,
+    `   Why: ${l.triage.why}`,
+    `   Suggested lever: ${l.triage.lever}`,
+  ].join('\n'));
+  const message = [
+    `${lots.length} deserted lot(s) at ${meta.name} routed to you.`,
+    'Public PLACSP data. Claude classified the likely reason with the hospital\'s rules; you decide what to do.',
+    'If the reason looks wrong, reply to this email: the correction becomes ground truth.',
+    '', ...lines,
+  ].join('\n');
+  return { json: { to: email, subject: `Deserted lots: ${lots.length} routed to you (${meta.name})`, message } };
+});
+"""
+
+TRIAGE_ROWS_JS = r"""
+// The triage log: one row per lot, so the same lot is never triaged twice.
+const at = $now.toISO();
+return $input.all().map(it => ({ json: {
+  triaged_at: at, hospital: it.json.hospital, lot_key: it.json.lot_key, title: it.json.title,
+  outcome: it.json.outcome, bucket: it.json.triage.bucket, lever: it.json.triage.lever,
+  owner_role: it.json.owner_role, confidence: it.json.triage.confidence, why: it.json.triage.why,
+} }));
+"""
+
+ROUTES = [("Structural", "structural", "Procurement", "procurement_email"),
+          ("Earlier decision", "earlier_decision", "Procurement + equipment owner", "procurement_email"),
+          ("Addressable", "addressable", "Requesting unit", "units_email")]
+
+
+def deserted_triage() -> dict:
+    WF[0] = "triage"
+    route_rules = [{
+        "conditions": {"options": {"caseSensitive": True, "leftValue": "", "typeValidation": "strict", "version": 2},
+                       "combinator": "and", "conditions": [{
+                           "id": f"r{i}", "leftValue": "={{ $json.triage.bucket }}", "rightValue": bucket,
+                           "operator": {"type": "string", "operation": "equals"}}]},
+        "renameOutput": True, "outputKey": out} for i, (out, bucket, _, _) in enumerate(ROUTES)]
+
+    def owner(name, y, role, email_key):
+        return node(name, "n8n-nodes-base.set", 3.4, (2240, y), {
+            "assignments": {"assignments": [
+                {"id": "o1", "name": "owner_role", "type": "string", "value": role},
+                {"id": "o2", "name": "owner_email", "type": "string",
+                 "value": f"={{{{ $('Config').first().json.{email_key} }}}}"}]},
+            "includeOtherFields": True, "options": {}})
+
+    nodes = [
+        node("Every Monday 08:30", "n8n-nodes-base.scheduleTrigger", 1.2, (0, 0),
+             {"rule": {"interval": [{"field": "weeks", "triggerAtDay": [1], "triggerAtHour": 8,
+                                     "triggerAtMinute": 30}]}}),
+        node("Run now", "n8n-nodes-base.manualTrigger", 1, (0, 200), {}),
+        node("Config", "n8n-nodes-base.set", 3.4, (240, 100), {"assignments": {"assignments": [
+            {"id": "c1", "name": "deserted_url", "type": "string",
+             "value": "https://raw.githubusercontent.com/digvijaysingh-ai/n8n-continuity/main/snapshot/deserted_H-f381.json"},
+            {"id": "c2", "name": "procurement_email", "type": "string", "value": "you@example.com"},
+            {"id": "c3", "name": "units_email", "type": "string", "value": "you@example.com"},
+            {"id": "c4", "name": "max_lots", "type": "number", "value": 6},
+            {"id": "c5", "name": "language", "type": "string", "value": "English"},
+        ]}, "options": {}}),
+        node("Fetch deserted lots", "n8n-nodes-base.httpRequest", 4.2, (480, 100),
+             {"url": "={{ $json.deserted_url }}",
+              "options": {"timeout": 30000, "response": {"response": {"responseFormat": "json"}}}},
+             retryOnFail=True, maxTries=3, waitBetweenTries=5000),
+        node("One item per lot", "n8n-nodes-base.splitOut", 1, (720, 100), {"fieldToSplitOut": "items", "options": {}}),
+        node("Lot key", "n8n-nodes-base.set", 3.4, (960, 100), {"assignments": {"assignments": [
+            {"id": "k1", "name": "lot_key", "type": "string", "value": "={{ $json.contract_ref }}/{{ $json.lot_id ?? '1' }}"}]},
+            "includeOtherFields": True, "options": {}}),
+        node("Not triaged yet", "n8n-nodes-base.dataTable", 1, (1200, 100), {
+            "resource": "row", "operation": "rowNotExists",
+            "dataTableId": {"__rl": True, "mode": "name", "value": "deserted_triage"},
+            "filters": {"conditions": [{"keyName": "lot_key", "keyValue": "={{ $json.lot_key }}"}]}}),
+        node("Top lots", "n8n-nodes-base.limit", 1, (1440, 100),
+             {"maxItems": "={{ $('Config').first().json.max_lots }}"}),
+        node("Claude triage", "@n8n/n8n-nodes-langchain.chainLlm", 1.7, (1680, 100),
+             {"promptType": "define", "text": TRIAGE_PROMPT, "hasOutputParser": False}),
+        node("Claude", "@n8n/n8n-nodes-langchain.lmChatAnthropic", 1.6, (1660, 320),
+             {"model": {"__rl": True, "mode": "id", "value": MODEL},
+              "options": {"temperature": 0.2, "maxTokensToSample": 1024}}),
+        node("Parse triage", "n8n-nodes-base.code", 2, (1900, 100), {"jsCode": TRIAGE_PARSE_JS.strip()}),
+        node("Route by reason", "n8n-nodes-base.switch", 3.2, (2080, 100), {
+            "rules": {"values": route_rules},
+            "options": {"fallbackOutput": "extra", "renameFallbackOutput": "Unclear"}}),
+        *[owner(f"To {role}", -200 + 160 * i, role, key) for i, (_, _, role, key) in enumerate(ROUTES)],
+        owner("To Procurement (check)", 280, "Procurement (check)", "procurement_email"),
+        node("All routed lots", "n8n-nodes-base.merge", 3.1, (2480, 100), {"numberInputs": 4}),
+        node("Digest per owner", "n8n-nodes-base.code", 2, (2720, 0), {"jsCode": ROUTE_DIGEST_JS.strip()}),
+        node("Email owner", "n8n-nodes-base.gmail", 2.1, (2960, 0), {"resource": "message", "operation": "send",
+            "sendTo": "={{ $json.to }}", "subject": "={{ $json.subject }}", "emailType": "text",
+            "message": "={{ $json.message }}", "options": {"appendAttribution": False}}),
+        node("Triage rows", "n8n-nodes-base.code", 2, (2720, 220), {"jsCode": TRIAGE_ROWS_JS.strip()}),
+        node("Log triage", "n8n-nodes-base.dataTable", 1, (2960, 220), {
+            "resource": "row", "operation": "insert",
+            "dataTableId": {"__rl": True, "mode": "name", "value": "deserted_triage"},
+            "columns": {"mappingMode": "autoMapInputData", "value": {}, "matchingColumns": [], "schema": []},
+            "options": {}}),
+        note("About", (-40, -420), 700, 360,
+             "## Deserted-lot triage\nA lot nobody bid for forces a negotiated procedure and the need is still there. "
+             "Each week this finds new deserted lots, has Claude classify the likely reason with the hospital's "
+             "own rules (structural / earlier decision / addressable) and routes each to the owner who can act.\n\n"
+             "**Data:** public PLACSP results via Licita, anonymised. **Guardrails:** routing informs, it doesn't "
+             "decide; unreadable or unsupported cases go to Procurement as `unclear`; every lot is logged once.", "5"),
+        note("Idempotent", (1120, -260), 420, 220,
+             "### Never twice\n`Not triaged yet` checks the `deserted_triage` table, so a lot is classified "
+             "and emailed once, however often the workflow runs.", "4"),
+        note("Routing", (2160, -440), 520, 200,
+             "### Who acts\nStructural → Procurement (check exclusivity, negotiated procedure). Earlier decision → "
+             "Procurement with the equipment owner. Addressable → the requesting unit (market consultation, "
+             "budget, lots). Unclear → Procurement for a manual look.", "6"),
+    ]
+    connections = main_link(
+        ("Every Monday 08:30", "Config"), ("Run now", "Config"), ("Config", "Fetch deserted lots"),
+        ("Fetch deserted lots", "One item per lot"), ("One item per lot", "Lot key"), ("Lot key", "Not triaged yet"),
+        ("Not triaged yet", "Top lots"), ("Top lots", "Claude triage"), ("Claude triage", "Parse triage"),
+        ("Parse triage", "Route by reason"),
+        ("Route by reason", "To Procurement", 0), ("Route by reason", "To Procurement + equipment owner", 1),
+        ("Route by reason", "To Requesting unit", 2), ("Route by reason", "To Procurement (check)", 3),
+        ("All routed lots", "Digest per owner"), ("All routed lots", "Triage rows"),
+        ("Digest per owner", "Email owner"), ("Triage rows", "Log triage"))
+    for i, src in enumerate(["To Procurement", "To Procurement + equipment owner", "To Requesting unit",
+                             "To Procurement (check)"]):
+        connections[src] = {"main": [[{"node": "All routed lots", "type": "main", "index": i}]]}
+    connections["Claude"] = {"ai_languageModel": [[{"node": "Claude triage", "type": "ai_languageModel", "index": 0}]]}
+    WF[0] = "radar"
+    return {"name": "Contract continuity – deserted-lot triage", "nodes": nodes, "connections": connections,
+            "settings": {"executionOrder": "v1", "timezone": "Europe/Madrid", "saveManualExecutions": True},
+            "pinData": {}, "tags": []}
+
+
 if __name__ == "__main__":
-    for fname, wf in {"expiry_radar.json": expiry_radar()}.items():
+    for fname, wf in {"expiry_radar.json": expiry_radar(), "deserted_triage.json": deserted_triage()}.items():
         (OUT / fname).write_text(json.dumps(wf, indent=2, ensure_ascii=False) + "\n")
         print("wrote", fname, len(wf["nodes"]), "nodes")
